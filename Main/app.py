@@ -1,59 +1,272 @@
-import pygame
-from tkinter import *
-from tkinter import filedialog
+import tkinter as tk
+from tkinter import filedialog, ttk
+from PIL import Image, ImageTk, ImageFilter, ImageEnhance
 import os
+import pygame
+import time
+import threading
+import random
+from mutagen.mp3 import MP3
+from mutagen.id3 import ID3
+import io
 
-def stop_song():
-    pygame.mixer.music.stop()
+class ModernMP3PlayerUI:
+    def __init__(self, master):
+        self.master = master
+        master.title("Nebula Waves MP3 Player")
+        master.geometry("400x700")
+        master.configure(bg='#121212')
 
-class MP3Player:
-    def __init__(self, root):
-        self.file_path = None
-        self.root = root
-        self.root.title("MP3 Player")
-        self.root.geometry("300x250")
-        
+        # Initialize pygame mixer
         pygame.mixer.init()
-        
-        self.track = StringVar()
-        self.error_message = StringVar()
-        
-        self.track_label = Label(root, textvariable=self.track)
-        self.track_label.pack()
-        
-        self.play_button = Button(root, text="Play", command=self.play_song)
-        self.play_button.pack()
-        
-        self.stop_button = Button(root, text="Stop", command=stop_song)
-        self.stop_button.pack()
-        
-        self.load_button = Button(root, text="Load", command=self.load_song)
-        self.load_button.pack()
 
-        self.error_label = Label(root, textvariable=self.error_message, fg="red")
-        self.error_label.pack()
-        
-    def load_song(self):
-        self.error_message.set("")
-        self.file_path = filedialog.askopenfilename()
-        if self.file_path:
-            self.track.set(os.path.basename(self.file_path))
-            print(f"Loaded file: {self.file_path}")
-    
-    def play_song(self):
-        if self.file_path:
-            try:
-                pygame.mixer.music.load(self.file_path)
-                pygame.mixer.music.play()
-                print(f"Playing file: {self.file_path}")
-            except pygame.error as e:
-                self.error_message.set("Unsupported file format!")
-                print(f"Could not load file: {e}")
+        self.current_file = None
+        self.playing = False
+        self.shuffle = False
+        self.repeat = 'off'  # 'off', 'one', 'all'
+        self.create_widgets()
+
+    def create_widgets(self):
+        # Custom fonts
+        self.title_font = ("Helvetica", 18, "bold")
+        self.subtitle_font = ("Helvetica", 14)
+        self.body_font = ("Helvetica", 12)
+
+        # Album Art
+        self.album_frame = tk.Frame(self.master, bg='#121212', width=300, height=300)
+        self.album_frame.pack(pady=20)
+        self.album_frame.pack_propagate(0)
+
+        self.album_art = tk.Label(self.album_frame, bg='#121212')
+        self.load_album_art("default_album_art.png")
+        self.album_art.pack(fill=tk.BOTH, expand=True)
+
+        # Song Info
+        self.song_name = tk.Label(self.master, text="No song playing", font=self.title_font, fg="#FFFFFF", bg='#121212')
+        self.song_name.pack()
+
+        self.artist_name = tk.Label(self.master, text="Unknown artist", font=self.subtitle_font, fg="#B3B3B3", bg='#121212')
+        self.artist_name.pack()
+
+        # Progress Bar and Time Labels
+        progress_frame = tk.Frame(self.master, bg='#121212')
+        progress_frame.pack(pady=10, padx=20, fill=tk.X)
+
+        self.current_time = tk.Label(progress_frame, text="0:00", font=self.body_font, fg="#B3B3B3", bg='#121212')
+        self.current_time.pack(side=tk.LEFT)
+
+        self.progress_bar = ttk.Scale(progress_frame, from_=0, to=100, orient=tk.HORIZONTAL, command=self.seek)
+        self.progress_bar.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=10)
+
+        self.total_time = tk.Label(progress_frame, text="0:00", font=self.body_font, fg="#B3B3B3", bg='#121212')
+        self.total_time.pack(side=tk.RIGHT)
+
+        # Playback Controls
+        control_frame = tk.Frame(self.master, bg='#121212')
+        control_frame.pack(pady=10)
+
+        button_style = {"font": ("Helvetica", 20), "bg": '#121212', "fg": '#1DB954', "bd": 0, "activebackground": '#121212', "activeforeground": '#1ED760'}
+
+        self.shuffle_btn = tk.Button(control_frame, text="🔀", command=self.toggle_shuffle, **button_style)
+        prev_btn = tk.Button(control_frame, text="⏮", command=self.previous_track, **button_style)
+        self.play_btn = tk.Button(control_frame, text="▶", command=self.play_pause, **button_style)
+        next_btn = tk.Button(control_frame, text="⏭", command=self.next_track, **button_style)
+        self.repeat_btn = tk.Button(control_frame, text="🔁", command=self.toggle_repeat, **button_style)
+
+        self.shuffle_btn.pack(side=tk.LEFT, padx=10)
+        prev_btn.pack(side=tk.LEFT, padx=10)
+        self.play_btn.pack(side=tk.LEFT, padx=10)
+        next_btn.pack(side=tk.LEFT, padx=10)
+        self.repeat_btn.pack(side=tk.LEFT, padx=10)
+
+        # Volume Control
+        volume_frame = tk.Frame(self.master, bg='#121212')
+        volume_frame.pack(pady=10)
+
+        volume_low = tk.Label(volume_frame, text="🔈", font=self.body_font, fg='#B3B3B3', bg='#121212')
+        volume_low.pack(side=tk.LEFT, padx=(0, 5))
+
+        self.volume_slider = ttk.Scale(volume_frame, from_=0, to=100, orient=tk.HORIZONTAL, length=250, command=self.set_volume)
+        self.volume_slider.set(50)
+        self.volume_slider.pack(side=tk.LEFT)
+
+        volume_high = tk.Label(volume_frame, text="🔊", font=self.body_font, fg='#B3B3B3', bg='#121212')
+        volume_high.pack(side=tk.LEFT, padx=(5, 0))
+
+        # Open File Button (Moved up and restyled)
+        open_file_btn = tk.Button(self.master, text="Add MP3 Files", command=self.open_files,
+                                  font=self.body_font, bg='#1DB954', fg='white',
+                                  activebackground='#1ED760', activeforeground='white',
+                                  relief=tk.GROOVE, bd=1, padx=10, pady=5)
+        open_file_btn.pack(pady=10)
+
+        # Playlist
+        playlist_frame = tk.Frame(self.master, bg='#121212')
+        playlist_frame.pack(pady=10, fill=tk.BOTH, expand=True)
+
+        playlist_label = tk.Label(playlist_frame, text="Playlist", font=self.subtitle_font, fg="#FFFFFF", bg='#121212')
+        playlist_label.pack()
+
+        self.playlist = tk.Listbox(playlist_frame, bg='#282828', fg='#B3B3B3', selectbackground='#1DB954',
+                                   selectforeground='white', font=self.body_font, height=5, bd=0, highlightthickness=0)
+        self.playlist.pack(fill=tk.BOTH, expand=True, padx=20)
+        self.playlist.bind('<<ListboxSelect>>', self.play_selected)
+
+        # Style the ttk widgets
+        style = ttk.Style()
+        style.theme_use('default')
+        style.configure("Horizontal.TScale", background='#121212', troughcolor='#535353', sliderlength=15, sliderrelief=tk.FLAT)
+        style.map("Horizontal.TScale", background=[('active', '#1DB954')])
+
+        # Start update thread
+        self.update_thread = threading.Thread(target=self.update_progress, daemon=True)
+        self.update_thread.start()
+
+    def load_album_art(self, path, from_file=True):
+        if from_file:
+            img = Image.open(path)
         else:
-            self.error_message.set("No file loaded to play")
-            print("No file loaded to play")
+            img = Image.open(io.BytesIO(path))
+        img = img.resize((280, 280), Image.LANCZOS)
+
+        # Add a subtle glow effect
+        glow = img.filter(ImageFilter.GaussianBlur(3))
+        glow = ImageEnhance.Brightness(glow).enhance(1.2)
+        img = Image.blend(img, glow, 0.15)
+
+        photo = ImageTk.PhotoImage(img)
+        self.album_art.config(image=photo)
+        self.album_art.image = photo
+
+    def open_files(self):
+        file_paths = filedialog.askopenfilenames(filetypes=[("MP3 files", "*.mp3")])
+        for file_path in file_paths:
+            self.add_to_playlist(file_path)
+        if not self.current_file and file_paths:
+            self.play_file(file_paths[0])
+
+    def add_to_playlist(self, file_path):
+        file_name = os.path.basename(file_path)
+        self.playlist.insert(tk.END, file_name)
+        self.playlist.itemconfig(tk.END, {'fg': '#B3B3B3'})
+
+    def play_file(self, file_path):
+        pygame.mixer.music.load(file_path)
+        pygame.mixer.music.play()
+        self.current_file = file_path
+        self.playing = True
+        self.update_song_info()
+        self.play_btn.config(text="⏸")
+        self.update_total_time()
+
+    def update_song_info(self):
+        if self.current_file:
+            try:
+                audio = ID3(self.current_file)
+                title = audio.get('TIT2', ['Unknown Title'])[0]
+                artist = audio.get('TPE1', ['Unknown Artist'])[0]
+                self.song_name.config(text=title)
+                self.artist_name.config(text=artist)
+
+                # Try to load album art
+                if 'APIC:' in audio:
+                    self.load_album_art(audio['APIC:'].data, from_file=False)
+                else:
+                    self.load_album_art("default_album_art.png")
+            except:
+                file_name = os.path.basename(self.current_file)
+                self.song_name.config(text=file_name)
+                self.artist_name.config(text="Unknown Artist")
+                self.load_album_art("default_album_art.png")
+
+    def play_pause(self):
+        if self.current_file:
+            if self.playing:
+                pygame.mixer.music.pause()
+                self.play_btn.config(text="▶")
+                self.playing = False
+            else:
+                pygame.mixer.music.unpause()
+                self.play_btn.config(text="⏸")
+                self.playing = True
+        elif self.playlist.size() > 0:
+            self.play_selected()
+
+    def play_selected(self, event=None):
+        selected = self.playlist.curselection()
+        if selected:
+            index = selected[0]
+            file_name = self.playlist.get(index)
+            file_path = os.path.join(os.path.dirname(self.current_file), file_name) if self.current_file else file_name
+            self.play_file(file_path)
+
+    def previous_track(self):
+        if self.current_file:
+            current_index = self.playlist.get(0, tk.END).index(os.path.basename(self.current_file))
+            if current_index > 0:
+                self.play_file(os.path.join(os.path.dirname(self.current_file), self.playlist.get(current_index - 1)))
+            elif self.repeat == 'all':
+                self.play_file(os.path.join(os.path.dirname(self.current_file), self.playlist.get(tk.END)))
+
+    def next_track(self):
+        if self.current_file:
+            playlist_items = self.playlist.get(0, tk.END)
+            current_index = playlist_items.index(os.path.basename(self.current_file))
+            if self.shuffle:
+                next_index = random.randint(0, len(playlist_items) - 1)
+            elif current_index < len(playlist_items) - 1:
+                next_index = current_index + 1
+            elif self.repeat == 'all':
+                next_index = 0
+            else:
+                return
+            self.play_file(os.path.join(os.path.dirname(self.current_file), playlist_items[next_index]))
+
+    def set_volume(self, val):
+        volume = float(val) / 100
+        pygame.mixer.music.set_volume(volume)
+
+    def seek(self, val):
+        if self.current_file:
+            total_seconds = MP3(self.current_file).info.length
+            pygame.mixer.music.set_pos(float(val) * total_seconds / 100)
+
+    def update_progress(self):
+        while True:
+            if self.playing and self.current_file:
+                current_time = pygame.mixer.music.get_pos() / 1000
+                total_time = MP3(self.current_file).info.length
+                self.progress_bar.set(current_time / total_time * 100)
+                self.current_time.config(text=time.strftime('%M:%S', time.gmtime(current_time)))
+
+                if current_time >= total_time:
+                    if self.repeat == 'one':
+                        self.play_file(self.current_file)
+                    else:
+                        self.next_track()
+            time.sleep(0.1)
+
+    def update_total_time(self):
+        if self.current_file:
+            total_time = MP3(self.current_file).info.length
+            self.total_time.config(text=time.strftime('%M:%S', time.gmtime(total_time)))
+
+    def toggle_shuffle(self):
+        self.shuffle = not self.shuffle
+        self.shuffle_btn.config(fg='#1DB954' if self.shuffle else '#FFFFFF')
+
+    def toggle_repeat(self):
+        if self.repeat == 'off':
+            self.repeat = 'all'
+            self.repeat_btn.config(fg='#1DB954', text='🔁')
+        elif self.repeat == 'all':
+            self.repeat = 'one'
+            self.repeat_btn.config(fg='#1DB954', text='🔂')
+        else:
+            self.repeat = 'off'
+            self.repeat_btn.config(fg='#FFFFFF', text='🔁')
 
 if __name__ == "__main__":
-    root = Tk()
-    app = MP3Player(root)
+    root = tk.Tk()
+    player = ModernMP3PlayerUI(root)
     root.mainloop()
